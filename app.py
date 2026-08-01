@@ -20,6 +20,7 @@ PAGES:
 
 import json
 import os
+import random
 import tempfile
 from datetime import datetime
 
@@ -29,6 +30,9 @@ from elevenlabs.client import ElevenLabs
 
 from analysis import analyze_speech
 from database import save_session, get_recent_sessions, get_all_sessions
+from pronunciation import (
+    PRONUNCIATION_DRILLS, score_pronunciation, get_pronunciation_feedback
+)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -205,8 +209,11 @@ div.stButton > button[kind="primary"]:hover {
 st.session_state.setdefault("page", "home")
 st.session_state.setdefault("analysis", None)
 st.session_state.setdefault("session_saved", False)
-# Chat history: list of {"role": "coach"|"user", "text": "...", "audio": bytes|None}
 st.session_state.setdefault("chat_history", [])
+st.session_state.setdefault("pronun_drill", None)
+st.session_state.setdefault("pronun_level", "beginner")
+st.session_state.setdefault("pronun_score", None)
+st.session_state.setdefault("streak", 0)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -405,12 +412,18 @@ def page_home():
         unsafe_allow_html=True,
     )
 
-    if st.button("🎤 Start Practice", type="primary", use_container_width=True):
+    col1, col2 = st.columns(2)
+    if col1.button("🎤 Speech Practice", type="primary", use_container_width=True):
         st.session_state.page = "practice"
         st.session_state.analysis = None
-        st.session_state.feedback = ""
-        st.session_state.coach_audio = None
         st.session_state.session_saved = False
+        st.session_state.chat_history = []
+        st.rerun()
+
+    if col2.button("🗣 Pronunciation", type="primary", use_container_width=True):
+        st.session_state.page = "pronunciation"
+        st.session_state.pronun_drill = None
+        st.session_state.pronun_score = None
         st.rerun()
 
     # ── Recent stats ──────────────────────────────────────────────────────────
@@ -676,6 +689,192 @@ def page_history():
                 st.markdown(s["feedback"])
 
 
+def page_pronunciation():
+    """
+    ELSA-style pronunciation trainer.
+    Shows a sentence, user records it, app scores word by word.
+    """
+    if st.button("← Home"):
+        st.session_state.page = "home"
+        st.session_state.pronun_score = None
+        st.session_state.pronun_drill = None
+        st.rerun()
+
+    st.title("🗣 Pronunciation Coach")
+    st.caption("American English · Powered by AI")
+
+    # ── Level selector ─────────────────────────────────────────────────────────
+    level = st.selectbox(
+        "Difficulty",
+        ["beginner", "intermediate", "advanced"],
+        index=["beginner", "intermediate", "advanced"].index(
+            st.session_state.pronun_level
+        ),
+    )
+    if level != st.session_state.pronun_level:
+        st.session_state.pronun_level = level
+        st.session_state.pronun_drill = None
+        st.session_state.pronun_score = None
+
+    # ── Pick a drill ──────────────────────────────────────────────────────────
+    if not st.session_state.pronun_drill:
+        st.session_state.pronun_drill = random.choice(
+            PRONUNCIATION_DRILLS[st.session_state.pronun_level]
+        )
+        st.session_state.pronun_score = None
+
+    drill = st.session_state.pronun_drill
+
+    # ── Show the target sentence ───────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### 📖 Read this sentence aloud:")
+    st.markdown(
+        f"<div class='drill-card'>"
+        f"<p style='font-size:1.4rem; font-weight:600; margin:0; color:#e2e8f0;'>"
+        f"\"{drill['sentence']}\""
+        f"</p>"
+        f"<p style='margin:0.8rem 0 0; font-size:0.85rem; color:#a855f7;'>"
+        f"🎯 Focus: {drill['focus']}</p>"
+        f"<p style='margin:0.3rem 0 0; font-size:0.8rem; color:#94a3b8;'>"
+        f"💡 {drill['tip']}</p>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    # Highlight target words
+    st.caption("Key words to nail: " + " · ".join(f"**{w}**" for w in drill["targets"]))
+
+    # ── Record ────────────────────────────────────────────────────────────────
+    st.markdown("### 🎙 Now say it:")
+    audio = st.audio_input(
+        "Record",
+        label_visibility="collapsed",
+        key=f"pronun_{st.session_state.get('audio_key', 0)}",
+    )
+
+    if audio and not st.session_state.pronun_score:
+        with st.status("🔍 Scoring your pronunciation...", expanded=True) as status:
+            st.write("📝 Transcribing...")
+            transcription = transcribe_audio(audio.getvalue())
+            actual = transcription["text"].strip()
+
+            if not actual:
+                st.error("No speech detected. Try again.")
+                return
+
+            st.write("📊 Comparing word by word...")
+            score = score_pronunciation(drill["sentence"], actual)
+
+            st.write("🧠 Coach Alex is preparing feedback...")
+            feedback_prompt = get_pronunciation_feedback(
+                drill["sentence"], actual, score, drill
+            )
+            client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+            resp = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": "You are Coach Alex, a warm American English pronunciation coach. Keep responses under 100 words. This will be spoken aloud."},
+                    {"role": "user", "content": feedback_prompt},
+                ],
+                max_tokens=200,
+                temperature=0.7,
+            )
+            feedback_text = resp.choices[0].message.content
+
+            st.write("🔊 Preparing voice feedback...")
+            try:
+                feedback_audio = speak_feedback(feedback_text)
+            except Exception as e:
+                feedback_audio = None
+
+            st.session_state.pronun_score = {
+                "score": score,
+                "actual": actual,
+                "feedback_text": feedback_text,
+                "feedback_audio": feedback_audio,
+            }
+            status.update(label="✅ Done!", state="complete", expanded=False)
+        st.rerun()
+
+    # ── Show results ──────────────────────────────────────────────────────────
+    if st.session_state.pronun_score:
+        result = st.session_state.pronun_score
+        score = result["score"]
+        accuracy = score["accuracy"]
+
+        st.markdown("---")
+        st.markdown("### 📊 Your Score")
+
+        # Big accuracy score
+        color = "#22c55e" if accuracy >= 80 else "#f59e0b" if accuracy >= 60 else "#ef4444"
+        st.markdown(
+            f"<div style='text-align:center; padding:1.5rem; background:#1a1a2e; "
+            f"border-radius:16px; border: 2px solid {color};'>"
+            f"<p style='font-size:4rem; font-weight:700; color:{color}; margin:0;'>{accuracy}%</p>"
+            f"<p style='color:#94a3b8; margin:0;'>Pronunciation Accuracy</p>"
+            f"<p style='margin:0.5rem 0 0; color:#e2e8f0;'>"
+            f"{score['correct_count']} of {score['total_words']} words clear</p>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        # Word-by-word breakdown
+        st.markdown("### 🔤 Word by Word")
+        cols = st.columns(min(len(score["word_results"]), 4))
+        for i, w in enumerate(score["word_results"]):
+            col = cols[i % len(cols)]
+            bg = "#14532d" if w["correct"] else "#7f1d1d"
+            text_color = "#86efac" if w["correct"] else "#fca5a5"
+            icon = "✅" if w["correct"] else "❌"
+            actual_show = "" if w["correct"] else f"<br><small>heard: '{w['actual']}'</small>"
+            col.markdown(
+                f"<div style='background:{bg}; border-radius:8px; padding:8px; "
+                f"text-align:center; margin:4px;'>"
+                f"<p style='color:{text_color}; margin:0; font-weight:600;'>{icon} {w['expected']}</p>"
+                f"<p style='color:#94a3b8; margin:0; font-size:0.75rem;'>{actual_show}</p>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+        # What you said vs target
+        st.markdown("---")
+        col1, col2 = st.columns(2)
+        col1.markdown("**🎯 Target:**")
+        col1.info(drill["sentence"])
+        col2.markdown("**🗣 What was heard:**")
+        col2.warning(result["actual"])
+
+        # Coach feedback
+        st.markdown("### 🎤 Coach Alex")
+        with st.chat_message("assistant", avatar="🎤"):
+            st.markdown(result["feedback_text"])
+            if result["feedback_audio"]:
+                st.audio(result["feedback_audio"], format="audio/mp3", autoplay=False)
+
+        # Update streak
+        if accuracy >= 70:
+            st.session_state.streak += 1
+            st.success(f"🔥 Streak: {st.session_state.streak} in a row!")
+
+        # Navigation
+        st.markdown("---")
+        col1, col2, col3 = st.columns(3)
+        if col1.button("🔄 Try Again", use_container_width=True):
+            st.session_state.pronun_score = None
+            st.session_state.audio_key = st.session_state.get("audio_key", 0) + 1
+            st.rerun()
+
+        if col2.button("⏭ Next Sentence", type="primary", use_container_width=True):
+            st.session_state.pronun_drill = None
+            st.session_state.pronun_score = None
+            st.session_state.audio_key = st.session_state.get("audio_key", 0) + 1
+            st.rerun()
+
+        if col3.button("🏠 Home", use_container_width=True):
+            st.session_state.page = "home"
+            st.rerun()
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SECTION 7: MAIN ROUTER
 # ══════════════════════════════════════════════════════════════════════════════
@@ -687,6 +886,8 @@ def main():
         page_home()
     elif page == "practice":
         page_practice()
+    elif page == "pronunciation":
+        page_pronunciation()
     elif page == "history":
         page_history()
     else:
