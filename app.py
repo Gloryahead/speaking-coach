@@ -215,6 +215,7 @@ st.session_state.setdefault("pronun_drill", None)
 st.session_state.setdefault("pronun_level", "beginner")
 st.session_state.setdefault("pronun_score", None)
 st.session_state.setdefault("streak", 0)
+st.session_state.setdefault("pending_question", None)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -332,33 +333,40 @@ def get_coaching_feedback(analysis: dict, drill_name: str) -> str:
     vol_var = vol.get("volume_variation", 0)
     vol_feedback = "monotone — needs more variation" if vol_var < 15 else "well varied" if vol_var <= 60 else "very erratic"
 
-    prompt = f"""You are Coach Alex, an expert communication scientist and public speaking coach.
-You have helped hundreds of people find their authentic voice and speak with confidence.
-Your feedback is warm, specific, science-based, and always actionable.
+    prompt = f"""You are Coach Alex — a world-class communication coach, public speaking expert,
+and behavioral scientist. You have coached TEDx speakers, executives, and everyday people
+to find their authentic voice and communicate with power and clarity.
 
-Here is the speaker's session data:
+You combine insights from:
+- Toastmasters framework (structure, clarity, vocal variety)
+- Aristotle's rhetoric (ethos, pathos, logos)
+- Neuroscience of communication (mirror neurons, dopamine, attention)
+- Body language science (Amy Cuddy, Albert Mehrabian)
+- Storytelling (narrative arc, emotional hooks, specificity)
+
+Here is this speaker's session data:
 - Drill: {drill_name}
 - Duration: {analysis['duration']} seconds
 - Words spoken: {analysis['word_count']}
 - Speaking pace: {analysis['wpm']} WPM (ideal: 120–160 WPM)
 - Filler words: {filler_summary}
-- Strategic pauses (0.5–2.5s): {analysis['strategic_pauses']} (aim for 3+)
-- Overly long pauses (>2.5s): {analysis['long_pauses']}
+- Strategic pauses: {analysis['strategic_pauses']} (aim for 3+)
+- Long pauses: {analysis['long_pauses']}
 - Volume variation: {vol_var}/100 — {vol_feedback} (ideal: 15–60)
-- Average volume: {vol.get('avg_volume', 0)}/100
 - Overall score: {analysis['overall_score']}/100
 
 Their transcript: "{analysis['transcript']}"
 
-Give feedback in this exact structure — speak directly to them, use "you":
-1. ONE specific thing they did well (be genuine and specific, not generic)
-2. Their #1 area to improve RIGHT NOW based on the data
-3. ONE practical exercise they can do in the next 5 minutes to improve it
-4. A brief insight from communication science that explains WHY this matters
-5. An encouraging closing sentence that mentions their score
+Give rich, sophisticated coaching in this structure:
+1. ONE genuine specific strength from their actual words (quote them)
+2. Their single most impactful improvement area based on the data
+3. A specific science-based technique to fix it (name the technique)
+4. ONE insight about how effective speakers use this skill (reference a real speaker or study)
+5. A rewritten version of one sentence from their transcript — show them how it would sound stronger
+6. Encouraging close that makes them excited to practice again
 
-IMPORTANT: Keep total response under 160 words. This will be spoken aloud.
-Be conversational and warm — like a real coach, not a report."""
+Keep under 200 words. Speak directly to them. This will be read aloud.
+Be sophisticated, warm, and inspiring — like a world-class human coach."""
 
     response = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
@@ -368,6 +376,59 @@ Be conversational and warm — like a real coach, not a report."""
     )
 
     return response.choices[0].message.content
+
+
+def animated_coach_message(text: str, audio_bytes: bytes | None):
+    """
+    Displays coach feedback with animated word-by-word text
+    and a prominent play button — feels alive even with browser autoplay restrictions.
+    """
+    # Prominent audio player with custom styling
+    if audio_bytes:
+        st.markdown("""
+        <div style="
+            background: linear-gradient(135deg, #1a1a2e, #16213e);
+            border: 2px solid #a855f7;
+            border-radius: 16px;
+            padding: 1rem 1.5rem;
+            margin: 0.5rem 0;
+            text-align: center;
+        ">
+            <p style="color:#a855f7; font-weight:700; margin:0 0 0.5rem;">
+                🔊 TAP PLAY TO HEAR COACH ALEX
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+        st.audio(audio_bytes, format="audio/mp3", autoplay=False)
+
+    # Animated word-by-word text display
+    words = text.split()
+    placeholder = st.empty()
+    displayed = ""
+    import time
+    for word in words:
+        displayed += word + " "
+        placeholder.markdown(
+            f"<div style='"
+            f"background:#1a1a2e; border-left:4px solid #a855f7; "
+            f"padding:1rem 1.2rem; border-radius:0 12px 12px 0; "
+            f"font-size:1.05rem; line-height:1.6; color:#e2e8f0;'>"
+            f"{displayed}"
+            f"<span style='color:#a855f7;'>▌</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        time.sleep(0.05)
+    # Final display without cursor
+    placeholder.markdown(
+        f"<div style='"
+        f"background:#1a1a2e; border-left:4px solid #a855f7; "
+        f"padding:1rem 1.2rem; border-radius:0 12px 12px 0; "
+        f"font-size:1.05rem; line-height:1.6; color:#e2e8f0;'>"
+        f"{text}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def speak_feedback(text: str) -> bytes:
@@ -425,6 +486,12 @@ def page_home():
         st.session_state.page = "pronunciation"
         st.session_state.pronun_drill = None
         st.session_state.pronun_score = None
+        st.rerun()
+
+    if st.button("🌟 Effective Speaking Masterclass", use_container_width=True):
+        st.session_state.page = "effective_speaking"
+        st.session_state.chat_history = []
+        st.session_state.pending_question = None
         st.rerun()
 
     # ── Recent stats ──────────────────────────────────────────────────────────
@@ -580,11 +647,19 @@ def page_practice():
     for msg in st.session_state.chat_history:
         if msg["role"] == "coach":
             with st.chat_message("assistant", avatar="🎤"):
-                st.markdown(msg["text"])
                 if msg.get("audio"):
+                    st.markdown("""
+                    <div style="background:linear-gradient(135deg,#1a1a2e,#16213e);
+                    border:2px solid #a855f7; border-radius:16px; padding:0.8rem 1.2rem;
+                    text-align:center; margin-bottom:0.5rem;">
+                    <p style="color:#a855f7;font-weight:700;margin:0;">🔊 TAP PLAY TO HEAR COACH ALEX</p>
+                    </div>""", unsafe_allow_html=True)
                     st.audio(msg["audio"], format="audio/mp3", autoplay=False)
-                else:
-                    st.warning("🔇 Voice failed — check ElevenLabs key permissions")
+                st.markdown(
+                    f"<div style='background:#1a1a2e; border-left:4px solid #a855f7; "
+                    f"padding:1rem 1.2rem; border-radius:0 12px 12px 0; "
+                    f"font-size:1.05rem; line-height:1.6; color:#e2e8f0;'>"
+                    f"{msg['text']}</div>", unsafe_allow_html=True)
         else:
             with st.chat_message("user", avatar="🧑"):
                 st.markdown(msg["text"])
@@ -878,9 +953,7 @@ def page_pronunciation():
         # Coach feedback with voice
         st.markdown("### 🎤 Coach Alex")
         with st.chat_message("assistant", avatar="🎤"):
-            st.markdown(data["feedback_text"])
-            if data["feedback_audio"]:
-                st.audio(data["feedback_audio"], format="audio/mp3", autoplay=False)
+            animated_coach_message(data["feedback_text"], data["feedback_audio"])
 
         # Streak
         if overall >= 70:
@@ -908,6 +981,120 @@ def page_pronunciation():
             st.rerun()
 
 
+def page_effective_speaking():
+    """
+    Masterclass-style effective speaking coach.
+    Covers the science and techniques of world-class communication.
+    User can ask any question and get expert coaching back with voice.
+    """
+    if st.button("← Home"):
+        st.session_state.page = "home"
+        st.rerun()
+
+    st.title("🌟 Effective Speaking Masterclass")
+    st.caption("World-class communication coaching · Powered by AI")
+
+    # ── Topic menu ─────────────────────────────────────────────────────────────
+    TOPICS = {
+        "🎯 How to Open a Speech Powerfully": "opening",
+        "📖 Storytelling That Moves People": "storytelling",
+        "💪 Building Confidence & Presence": "confidence",
+        "🧠 Persuasion & Influence Science": "persuasion",
+        "👁 Body Language & Eye Contact": "body_language",
+        "🎭 Vocal Variety & Charisma": "vocal_variety",
+        "😰 Overcoming Fear of Public Speaking": "fear",
+        "🏆 Structuring Any Speech (PREP/STAR)": "structure",
+        "🤝 Connecting With Any Audience": "audience",
+        "💼 Speaking in Meetings & Interviews": "professional",
+    }
+
+    st.markdown("### 📚 Choose a topic or ask anything below")
+
+    cols = st.columns(2)
+    for i, (label, key) in enumerate(TOPICS.items()):
+        if cols[i % 2].button(label, use_container_width=True, key=f"topic_{key}"):
+            st.session_state.chat_history = []
+            # Auto-ask the topic
+            question = f"Teach me about: {label.split(' ', 1)[1]}"
+            st.session_state.pending_question = question
+            st.rerun()
+
+    st.markdown("---")
+
+    # ── Chat interface ─────────────────────────────────────────────────────────
+    st.markdown("### 💬 Ask Coach Alex Anything")
+
+    # Display chat history
+    for msg in st.session_state.get("chat_history", []):
+        if msg["role"] == "coach":
+            with st.chat_message("assistant", avatar="🎤"):
+                animated_coach_message(msg["text"], msg.get("audio"))
+        else:
+            with st.chat_message("user", avatar="🧑"):
+                st.markdown(msg["text"])
+
+    # Handle pending question from topic button
+    pending = st.session_state.pop("pending_question", None)
+    user_input = pending or st.chat_input(
+        "Ask anything... e.g. 'How do I stop saying um?' or 'How did Obama open his speeches?'"
+    )
+
+    if user_input:
+        st.session_state.chat_history.append(
+            {"role": "user", "text": user_input, "audio": None}
+        )
+
+        with st.spinner("Coach Alex is thinking..."):
+            client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+
+            system = """You are Coach Alex — a world-class communication coach, behavioral scientist,
+and public speaking expert. You have studied and coached the greatest speakers of our time:
+Obama, Jobs, Churchill, Brené Brown, Simon Sinek, Oprah, Martin Luther King Jr.
+
+You teach the science and art of effective communication:
+- Aristotle's rhetoric: ethos (credibility), pathos (emotion), logos (logic)
+- Neuroscience: how stories activate mirror neurons and release oxytocin
+- The Rule of Three, Power of Pause, The Hook-Story-Offer framework
+- Amy Cuddy's power poses and body language research
+- Albert Mehrabian's 7-38-55 rule (words/tone/body language)
+- Toastmasters evaluation criteria
+- TEDx talk structure and techniques
+- The PREP framework (Point-Reason-Example-Point)
+- The STAR method (Situation-Task-Action-Result)
+
+Your coaching style:
+- Sophisticated, inspiring, and deeply knowledgeable
+- Always cite real examples from famous speakers
+- Give actionable techniques with specific names
+- Include the science behind WHY it works
+- Warm, encouraging, never condescending
+- Keep responses under 200 words — this will be spoken aloud"""
+
+            messages = [{"role": "system", "content": system}]
+            for msg in st.session_state.chat_history[:-1]:
+                role = "assistant" if msg["role"] == "coach" else "user"
+                messages.append({"role": role, "content": msg["text"]})
+            messages.append({"role": "user", "content": user_input})
+
+            resp = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=messages,
+                max_tokens=350,
+                temperature=0.7,
+            )
+            reply = resp.choices[0].message.content
+
+            try:
+                reply_audio = speak_feedback(reply)
+            except Exception:
+                reply_audio = None
+
+        st.session_state.chat_history.append(
+            {"role": "coach", "text": reply, "audio": reply_audio}
+        )
+        st.rerun()
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SECTION 7: MAIN ROUTER
 # ══════════════════════════════════════════════════════════════════════════════
@@ -923,6 +1110,8 @@ def main():
         page_pronunciation()
     elif page == "history":
         page_history()
+    elif page == "effective_speaking":
+        page_effective_speaking()
     else:
         st.session_state.page = "home"
         st.rerun()
