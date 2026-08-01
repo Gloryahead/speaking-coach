@@ -433,7 +433,7 @@ def page_practice():
                 coach_audio = speak_feedback(feedback)
             except Exception as e:
                 coach_audio = None
-                st.warning(f"Voice unavailable: {e}")
+                st.error(f"ElevenLabs error: {type(e).__name__}: {e}")
 
             st.session_state.analysis = analysis
             st.session_state.feedback = feedback
