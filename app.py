@@ -407,7 +407,7 @@ def page_practice():
     st.markdown("### 🎙 Record Your Speech")
     st.caption("Press the button to start recording. Press again to stop.")
 
-    audio = st.audio_input("Record", label_visibility="collapsed")
+    audio = st.audio_input("Record", label_visibility="collapsed", key=f"recorder_{st.session_state.get('audio_key', 0)}")
 
     if audio and not st.session_state.analysis:
         with st.status("🔍 Analysing your speech...", expanded=True) as status:
@@ -524,6 +524,8 @@ def page_practice():
             st.session_state.feedback = ""
             st.session_state.coach_audio = None
             st.session_state.session_saved = False
+            # Force the audio widget to reset by changing its key
+            st.session_state.audio_key = st.session_state.get("audio_key", 0) + 1
             st.rerun()
 
         if col2.button("🏠 Home", type="primary", use_container_width=True):
