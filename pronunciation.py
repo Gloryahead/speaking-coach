@@ -1,29 +1,43 @@
 """
-pronunciation.py — Pronunciation scoring engine.
+pronunciation.py — Azure-powered pronunciation assessment engine.
 
 HOW IT WORKS:
 ─────────────
 1. App shows user a target sentence
 2. User records themselves saying it
-3. Whisper transcribes what they ACTUALLY said
-4. We compare word-by-word: expected vs actual
-5. Claude explains the pronunciation mistakes and how to fix them
+3. Azure Speech SDK compares their audio against the target sentence
+4. Returns phoneme-level scores for every single sound
+5. Claude explains exactly what went wrong and how to fix it
 
-This approach works because:
-- If you say "world" but Whisper hears "word" → you dropped the L sound
-- If you say "comfortable" but Whisper hears "comftable" → syllable reduction
-- If you say "this" but Whisper hears "dis" → TH sound issue (common for many accents)
+WHY AZURE INSTEAD OF WHISPER:
+──────────────────────────────
+Whisper auto-corrects pronunciation mistakes (it guesses what you MEANT to say).
+Azure Pronunciation Assessment compares what you ACTUALLY said against the target,
+scoring every phoneme (individual sound) from 0-100.
 
-It's not as precise as ELSA's phoneme model but catches real pronunciation
-patterns that need work.
+This is the same technology used by ELSA Speak, Speechace, and other
+professional pronunciation apps.
+
+SCORES EXPLAINED:
+─────────────────
+- AccuracyScore:    How correctly each phoneme was pronounced (0-100)
+- FluencyScore:     How naturally you connected words (0-100)
+- CompletenessScore: Did you say all the words? (0-100)
+- ProsodyScore:     Rhythm, stress, and intonation (0-100)
+- OverallScore:     Weighted combination of all above
 """
 
-import difflib
+import io
+import json
+import tempfile
+import os
+import wave
 
+# Azure Speech SDK
+import azure.cognitiveservices.speech as speechsdk
 
 # ── American English pronunciation drills ─────────────────────────────────────
 # Organized by difficulty and common problem areas for non-native speakers.
-# Each drill targets specific sounds or patterns.
 
 PRONUNCIATION_DRILLS = {
     "beginner": [
@@ -40,22 +54,22 @@ PRONUNCIATION_DRILLS = {
             "tip": "Round your lips for 'would'. Tongue between teeth for 'think'.",
         },
         {
-            "sentence": "She sells seashells by the seashore every single summer.",
-            "targets": ["sells", "seashells", "seashore", "single", "summer"],
-            "focus": "S sound vs SH sound",
-            "tip": "S: teeth together, air through center. SH: lips forward, air through sides.",
-        },
-        {
             "sentence": "Please call me when you arrive at the airport.",
             "targets": ["please", "call", "arrive", "airport"],
             "focus": "L sound + R sound",
-            "tip": "For L, touch tongue to roof of mouth. For R, curl tongue back slightly.",
+            "tip": "For L, touch tongue to roof of mouth behind teeth. For R, curl tongue back slightly — don't touch anything.",
         },
         {
             "sentence": "My father and mother live in a comfortable neighborhood.",
             "targets": ["father", "mother", "comfortable", "neighborhood"],
             "focus": "TH sound + unstressed syllables",
-            "tip": "'Comfortable' = 3 syllables: COMF-ter-ble. Don't say every letter.",
+            "tip": "'Comfortable' = 3 syllables: COMF-ter-ble. Don't pronounce every letter.",
+        },
+        {
+            "sentence": "She sells seashells by the seashore every single summer.",
+            "targets": ["sells", "seashells", "seashore", "single", "summer"],
+            "focus": "S sound vs SH sound",
+            "tip": "S: teeth together, air through center. SH: lips slightly forward, broader airflow.",
         },
     ],
     "intermediate": [
@@ -63,31 +77,31 @@ PRONUNCIATION_DRILLS = {
             "sentence": "The entrepreneur identified three extraordinary opportunities for growth.",
             "targets": ["entrepreneur", "identified", "extraordinary", "opportunities"],
             "focus": "Multi-syllable words + stress patterns",
-            "tip": "entrepreneur = on-tre-pre-NEUR. Stress the last syllable.",
+            "tip": "entrepreneur = on-tre-pre-NEUR. Always stress the final syllable.",
         },
         {
             "sentence": "Particularly in February, the temperature drops significantly throughout the region.",
             "targets": ["particularly", "February", "temperature", "significantly", "throughout"],
             "focus": "Commonly mispronounced words",
-            "tip": "February = FEB-roo-ery (not Feb-you-ary). Temperature = TEM-pra-chure.",
+            "tip": "February = FEB-roo-ery. Temperature = TEM-pra-chure. Don't say every letter.",
         },
         {
             "sentence": "I thoroughly enjoy challenging myself with difficult vocabulary words.",
             "targets": ["thoroughly", "challenging", "difficult", "vocabulary"],
             "focus": "TH + complex consonant clusters",
-            "tip": "thoroughly = THUR-oh-lee. Don't skip the TH at the start.",
+            "tip": "thoroughly = THUR-oh-lee. The TH at the start is voiced — feel your throat vibrate.",
         },
         {
             "sentence": "The world requires both strength and vulnerability to lead effectively.",
             "targets": ["world", "requires", "strength", "vulnerability", "effectively"],
             "focus": "R-colored vowels + consonant clusters",
-            "tip": "'World' = not 'word'. Feel the L before the D: wer-LD.",
+            "tip": "'World' is not 'word'. Feel the L before the D: wer-LD. Don't drop it.",
         },
         {
-            "sentence": "Successful people consistently practice their communication skills.",
+            "sentence": "Successful people consistently practice their communication skills daily.",
             "targets": ["successful", "consistently", "practice", "communication"],
             "focus": "Word stress + clear endings",
-            "tip": "Don't drop word endings. 'Practice' ends in a clear S sound.",
+            "tip": "Don't drop word endings. 'Practice' ends with a crisp S sound.",
         },
     ],
     "advanced": [
@@ -95,140 +109,196 @@ PRONUNCIATION_DRILLS = {
             "sentence": "The pharmaceutical representatives enthusiastically presented their revolutionary research.",
             "targets": ["pharmaceutical", "representatives", "enthusiastically", "revolutionary"],
             "focus": "Long professional vocabulary",
-            "tip": "phar-ma-SEU-ti-cal. Break long words into syllables and practice each part.",
+            "tip": "phar-ma-SEU-ti-cal. Break long words into syllables and master each part separately.",
         },
         {
             "sentence": "Simultaneously addressing multiple stakeholders requires exceptional diplomatic communication.",
             "targets": ["simultaneously", "stakeholders", "exceptional", "diplomatic"],
             "focus": "High-level business vocabulary",
-            "tip": "si-mul-TAY-nee-us-lee. Stress the TAY syllable.",
+            "tip": "si-mul-TAY-nee-us-lee. The TAY syllable carries the stress.",
         },
         {
             "sentence": "The quintessential American experience encompasses extraordinary diversity and contradictions.",
             "targets": ["quintessential", "encompasses", "extraordinary", "contradictions"],
             "focus": "Academic and literary vocabulary",
-            "tip": "quin-te-SEN-tial. The QUIN sounds like KWIN.",
+            "tip": "quin-te-SEN-tial. QUIN sounds like KWIN. Stress the SEN syllable.",
+        },
+        {
+            "sentence": "Worcestershire sauce is notoriously difficult for non-native speakers to pronounce.",
+            "targets": ["Worcestershire", "notoriously", "difficult", "pronounce"],
+            "focus": "Silent letters + British loan words",
+            "tip": "Worcestershire = WUS-ter-sheer. Most letters are silent. This trips up even native speakers!",
         },
     ],
 }
 
-# ── Common pronunciation patterns by accent background ─────────────────────────
-# What speakers with certain first languages typically struggle with in American English.
-COMMON_ISSUES = {
-    "TH sounds": {
-        "problem": "Saying 'D' or 'T' instead of TH",
-        "examples": ["the→de", "this→dis", "three→tree", "think→tink"],
-        "fix": "Touch the tip of your tongue lightly to the back of your upper front teeth. Let air flow through.",
-    },
-    "R sounds": {
-        "problem": "Rolling R or dropping R entirely",
-        "examples": ["right→light", "very→vely", "world→wold"],
-        "fix": "Curl your tongue back slightly. Don't touch the roof of your mouth. Tighten the back of your tongue.",
-    },
-    "L sounds": {
-        "problem": "Substituting R for L or dropping L",
-        "examples": ["light→right", "call→car", "world→word"],
-        "fix": "Touch the tip of your tongue firmly to the ridge just behind your upper front teeth.",
-    },
-    "V vs B": {
-        "problem": "Saying B instead of V",
-        "examples": ["very→berry", "vote→boat", "video→bideo"],
-        "fix": "For V, your upper teeth touch your lower lip. For B, both lips press together.",
-    },
-    "Word endings": {
-        "problem": "Dropping final consonants",
-        "examples": ["fact→fac", "test→tes", "world→wor"],
-        "fix": "Americans pronounce final consonants clearly. Practice stopping the airflow for final T, D, K sounds.",
-    },
-}
 
-
-def score_pronunciation(expected: str, actual: str) -> dict:
+def assess_pronunciation(audio_bytes: bytes, target_sentence: str,
+                         azure_key: str, azure_region: str) -> dict:
     """
-    Compares expected sentence with what Whisper transcribed.
-    Returns word-by-word scoring and overall accuracy.
+    Uses Azure Cognitive Services to assess pronunciation against a target sentence.
 
-    Uses difflib SequenceMatcher to align words and find differences.
+    Returns detailed scores:
+    - overall_score: weighted average of all dimensions
+    - accuracy_score: phoneme-level correctness
+    - fluency_score: natural connected speech
+    - completeness_score: did you say all words?
+    - prosody_score: rhythm, stress, intonation
+    - word_scores: per-word breakdown with phoneme details
+    - problem_words: words that scored below 70
     """
-    # Normalize: lowercase, remove punctuation
-    def clean(text):
-        import re
-        return re.sub(r"[^\w\s]", "", text.lower()).split()
 
-    expected_words = clean(expected)
-    actual_words = clean(actual)
+    # Write audio to a temp WAV file — Azure SDK reads from file
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp.write(audio_bytes)
+        tmp_path = tmp.name
 
-    # Use SequenceMatcher to align expected vs actual words
-    matcher = difflib.SequenceMatcher(None, expected_words, actual_words)
-    blocks = matcher.get_matching_blocks()
+    try:
+        # ── Configure Azure Speech ────────────────────────────────────────────
+        speech_config = speechsdk.SpeechConfig(
+            subscription=azure_key,
+            region=azure_region,
+        )
+        speech_config.speech_recognition_language = "en-US"
 
-    # Build word-level results
-    word_results = []
-    matched = set()
-    actual_matched = set()
+        audio_config = speechsdk.audio.AudioConfig(filename=tmp_path)
 
-    for block in blocks:
-        i, j, n = block
-        for k in range(n):
-            word_results.append({
-                "expected": expected_words[i + k],
-                "actual": actual_words[j + k],
-                "correct": True,
-            })
-            matched.add(i + k)
-            actual_matched.add(j + k)
+        # ── Configure Pronunciation Assessment ───────────────────────────────
+        # GradingSystem: HundredMark = scores from 0-100
+        # Granularity: Phoneme = score every individual sound
+        # EnableMiscue: True = flag words that were added/omitted/substituted
+        pronun_config = speechsdk.PronunciationAssessmentConfig(
+            reference_text=target_sentence,
+            grading_system=speechsdk.PronunciationAssessmentGradingSystem.HundredMark,
+            granularity=speechsdk.PronunciationAssessmentGranularity.Phoneme,
+            enable_miscue=True,
+        )
+        pronun_config.enable_prosody_assessment()
 
-    # Find missed/wrong words
-    for i, word in enumerate(expected_words):
-        if i not in matched:
-            # Find closest match in actual
-            close = difflib.get_close_matches(word, actual_words, n=1, cutoff=0.6)
-            word_results.append({
-                "expected": word,
-                "actual": close[0] if close else "—",
-                "correct": False,
-            })
+        # ── Run assessment ────────────────────────────────────────────────────
+        recognizer = speechsdk.SpeechRecognizer(
+            speech_config=speech_config,
+            audio_config=audio_config,
+        )
+        pronun_config.apply_to(recognizer)
 
-    # Sort by expected word order
-    word_results.sort(key=lambda x: expected_words.index(x["expected"])
-                      if x["expected"] in expected_words else 999)
+        result = recognizer.recognize_once()
 
-    # Calculate accuracy
-    correct_count = sum(1 for w in word_results if w["correct"])
-    total = len(expected_words)
-    accuracy = round((correct_count / total) * 100) if total > 0 else 0
+        if result.reason != speechsdk.ResultReason.RecognizedSpeech:
+            return _fallback_result("Speech not recognized. Please speak clearly and try again.")
 
-    # Identify problem words
-    problem_words = [w["expected"] for w in word_results if not w["correct"]]
+        # ── Parse results ─────────────────────────────────────────────────────
+        pronun_result = speechsdk.PronunciationAssessmentResult(result)
 
+        # Overall scores
+        overall = round(pronun_result.pronunciation_score or 0)
+        accuracy = round(pronun_result.accuracy_score or 0)
+        fluency = round(pronun_result.fluency_score or 0)
+        completeness = round(pronun_result.completeness_score or 0)
+        prosody = round(getattr(pronun_result, "prosody_score", 0) or 0)
+
+        # Word-level breakdown
+        word_scores = []
+        problem_words = []
+
+        for word in pronun_result.words:
+            word_accuracy = round(word.accuracy_score or 0)
+            error_type = str(word.error_type) if word.error_type else "None"
+
+            # Get phoneme scores for this word
+            phonemes = []
+            if hasattr(word, "phonemes") and word.phonemes:
+                for ph in word.phonemes:
+                    ph_score = round(ph.accuracy_score or 0)
+                    phonemes.append({
+                        "phoneme": ph.phoneme,
+                        "score": ph_score,
+                        "ok": ph_score >= 60,
+                    })
+
+            word_data = {
+                "word": word.word,
+                "accuracy": word_accuracy,
+                "error_type": error_type,
+                "phonemes": phonemes,
+                "ok": word_accuracy >= 70 and error_type in ("None", ""),
+            }
+            word_scores.append(word_data)
+
+            if not word_data["ok"]:
+                problem_words.append(word_data)
+
+        # What the user actually said
+        actual_text = result.text
+
+        return {
+            "overall_score":       overall,
+            "accuracy_score":      accuracy,
+            "fluency_score":       fluency,
+            "completeness_score":  completeness,
+            "prosody_score":       prosody,
+            "word_scores":         word_scores,
+            "problem_words":       problem_words,
+            "actual_text":         actual_text,
+            "error":               None,
+        }
+
+    except Exception as e:
+        return _fallback_result(str(e))
+
+    finally:
+        os.unlink(tmp_path)
+
+
+def _fallback_result(error_msg: str) -> dict:
+    """Returns a safe empty result when Azure assessment fails."""
     return {
-        "accuracy":      accuracy,
-        "word_results":  word_results,
-        "problem_words": problem_words,
-        "correct_count": correct_count,
-        "total_words":   total,
+        "overall_score":      0,
+        "accuracy_score":     0,
+        "fluency_score":      0,
+        "completeness_score": 0,
+        "prosody_score":      0,
+        "word_scores":        [],
+        "problem_words":      [],
+        "actual_text":        "",
+        "error":              error_msg,
     }
 
 
-def get_pronunciation_feedback(expected: str, actual: str,
-                               score: dict, drill: dict) -> str:
+def build_feedback_prompt(target: str, result: dict, drill: dict) -> str:
     """
-    Asks Claude/LLaMA to explain pronunciation mistakes and give specific tips.
-    Returns coaching text to be spoken aloud.
+    Builds a coaching prompt for LLaMA based on Azure's detailed scores.
+    Includes phoneme-level detail for problem words.
     """
-    if score["problem_words"]:
-        problems = ", ".join(f'"{w}"' for w in score["problem_words"][:5])
-        problem_text = f"These words were unclear or mispronounced: {problems}"
-    else:
-        problem_text = "All words were recognized correctly!"
+    problem_detail = []
+    for w in result["problem_words"][:4]:
+        bad_phonemes = [p["phoneme"] for p in w["phonemes"] if not p["ok"]]
+        phoneme_str = f" (problem sounds: {', '.join(bad_phonemes)})" if bad_phonemes else ""
+        error = f" [{w['error_type']}]" if w["error_type"] not in ("None", "") else ""
+        problem_detail.append(f'"{w["word"]}" scored {w["accuracy"]}%{phoneme_str}{error}')
 
-    return f"""TARGET: "{expected}"
-WHAT WAS HEARD: "{actual}"
-ACCURACY: {score['accuracy']}%
-FOCUS AREA: {drill['focus']}
-PRONUNCIATION TIP: {drill['tip']}
-ISSUES: {problem_text}
+    problems = "\n".join(problem_detail) if problem_detail else "All words pronounced clearly!"
 
-Give warm, specific American English pronunciation coaching in under 100 words.
-Reference the specific words that were wrong. Explain the mouth/tongue position needed.
-Be encouraging. This will be spoken aloud."""
+    return f"""You are Coach Alex, a warm American English pronunciation coach.
+
+The speaker just attempted: "{target}"
+Azure pronunciation assessment results:
+- Overall: {result['overall_score']}/100
+- Accuracy: {result['accuracy_score']}/100 (phoneme correctness)
+- Fluency: {result['fluency_score']}/100 (natural flow)
+- Completeness: {result['completeness_score']}/100 (all words said)
+- Prosody: {result['prosody_score']}/100 (rhythm & stress)
+
+Problem words:
+{problems}
+
+Drill focus: {drill['focus']}
+Pronunciation tip: {drill['tip']}
+
+Give specific coaching in under 120 words:
+1. Acknowledge their score warmly
+2. Focus on their #1 problem word — explain exactly where to put their tongue/lips
+3. Give one actionable drill to fix it right now
+4. End with encouragement
+
+Speak directly to them. This will be read aloud."""

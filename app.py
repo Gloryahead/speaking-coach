@@ -31,7 +31,7 @@ from elevenlabs.client import ElevenLabs
 from analysis import analyze_speech
 from database import save_session, get_recent_sessions, get_all_sessions
 from pronunciation import (
-    PRONUNCIATION_DRILLS, score_pronunciation, get_pronunciation_feedback
+    PRONUNCIATION_DRILLS, assess_pronunciation, build_feedback_prompt
 )
 
 
@@ -753,108 +753,133 @@ def page_pronunciation():
     )
 
     if audio and not st.session_state.pronun_score:
-        with st.status("🔍 Scoring your pronunciation...", expanded=True) as status:
-            st.write("📝 Transcribing...")
-            transcription = transcribe_audio(audio.getvalue())
-            actual = transcription["text"].strip()
+        with st.status("🔍 Azure is scoring your pronunciation...", expanded=True) as status:
+            st.write("🧠 Analysing phoneme by phoneme...")
+            result = assess_pronunciation(
+                audio_bytes=audio.getvalue(),
+                target_sentence=drill["sentence"],
+                azure_key=st.secrets["AZURE_SPEECH_KEY"],
+                azure_region=st.secrets["AZURE_SPEECH_REGION"],
+            )
 
-            if not actual:
-                st.error("No speech detected. Try again.")
+            if result["error"]:
+                st.error(f"Assessment error: {result['error']}")
                 return
 
-            st.write("📊 Comparing word by word...")
-            score = score_pronunciation(drill["sentence"], actual)
-
-            st.write("🧠 Coach Alex is preparing feedback...")
-            feedback_prompt = get_pronunciation_feedback(
-                drill["sentence"], actual, score, drill
-            )
-            client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-            resp = client.chat.completions.create(
+            st.write("💬 Coach Alex is preparing feedback...")
+            feedback_prompt = build_feedback_prompt(drill["sentence"], result, drill)
+            groq_client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+            resp = groq_client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "system", "content": "You are Coach Alex, a warm American English pronunciation coach. Keep responses under 100 words. This will be spoken aloud."},
-                    {"role": "user", "content": feedback_prompt},
-                ],
-                max_tokens=200,
+                messages=[{"role": "user", "content": feedback_prompt}],
+                max_tokens=220,
                 temperature=0.7,
             )
             feedback_text = resp.choices[0].message.content
 
-            st.write("🔊 Preparing voice feedback...")
+            st.write("🔊 Preparing Coach Alex's voice...")
             try:
                 feedback_audio = speak_feedback(feedback_text)
-            except Exception as e:
+            except Exception:
                 feedback_audio = None
 
             st.session_state.pronun_score = {
-                "score": score,
-                "actual": actual,
+                "result": result,
                 "feedback_text": feedback_text,
                 "feedback_audio": feedback_audio,
             }
-            status.update(label="✅ Done!", state="complete", expanded=False)
+            status.update(label="✅ Assessment complete!", state="complete", expanded=False)
         st.rerun()
 
     # ── Show results ──────────────────────────────────────────────────────────
     if st.session_state.pronun_score:
-        result = st.session_state.pronun_score
-        score = result["score"]
-        accuracy = score["accuracy"]
+        data = st.session_state.pronun_score
+        result = data["result"]
+        overall = result["overall_score"]
 
         st.markdown("---")
-        st.markdown("### 📊 Your Score")
+        st.markdown("### 📊 Your Scores")
 
-        # Big accuracy score
-        color = "#22c55e" if accuracy >= 80 else "#f59e0b" if accuracy >= 60 else "#ef4444"
-        st.markdown(
-            f"<div style='text-align:center; padding:1.5rem; background:#1a1a2e; "
-            f"border-radius:16px; border: 2px solid {color};'>"
-            f"<p style='font-size:4rem; font-weight:700; color:{color}; margin:0;'>{accuracy}%</p>"
-            f"<p style='color:#94a3b8; margin:0;'>Pronunciation Accuracy</p>"
-            f"<p style='margin:0.5rem 0 0; color:#e2e8f0;'>"
-            f"{score['correct_count']} of {score['total_words']} words clear</p>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
+        # Score cards — 5 dimensions like ELSA
+        color = "#22c55e" if overall >= 80 else "#f59e0b" if overall >= 60 else "#ef4444"
+        col1, col2, col3, col4, col5 = st.columns(5)
 
-        # Word-by-word breakdown
-        st.markdown("### 🔤 Word by Word")
-        cols = st.columns(min(len(score["word_results"]), 4))
-        for i, w in enumerate(score["word_results"]):
-            col = cols[i % len(cols)]
-            bg = "#14532d" if w["correct"] else "#7f1d1d"
-            text_color = "#86efac" if w["correct"] else "#fca5a5"
-            icon = "✅" if w["correct"] else "❌"
-            actual_show = "" if w["correct"] else f"<br><small>heard: '{w['actual']}'</small>"
+        def score_card(col, label, value):
+            c = "#22c55e" if value >= 80 else "#f59e0b" if value >= 60 else "#ef4444"
             col.markdown(
-                f"<div style='background:{bg}; border-radius:8px; padding:8px; "
-                f"text-align:center; margin:4px;'>"
-                f"<p style='color:{text_color}; margin:0; font-weight:600;'>{icon} {w['expected']}</p>"
-                f"<p style='color:#94a3b8; margin:0; font-size:0.75rem;'>{actual_show}</p>"
-                f"</div>",
+                f"<div class='score-card'>"
+                f"<p class='score-big' style='color:{c}'>{value}</p>"
+                f"<p class='score-label'>{label}</p></div>",
                 unsafe_allow_html=True,
             )
 
-        # What you said vs target
+        score_card(col1, "Overall", overall)
+        score_card(col2, "Accuracy", result["accuracy_score"])
+        score_card(col3, "Fluency", result["fluency_score"])
+        score_card(col4, "Complete", result["completeness_score"])
+        score_card(col5, "Prosody", result["prosody_score"])
+
+        st.caption("Accuracy = phoneme correctness · Fluency = natural flow · Complete = all words said · Prosody = rhythm & stress")
+
+        # Word-by-word breakdown
+        st.markdown("### 🔤 Word by Word")
+        if result["word_scores"]:
+            cols = st.columns(min(len(result["word_scores"]), 5))
+            for i, w in enumerate(result["word_scores"]):
+                col = cols[i % len(cols)]
+                bg = "#14532d" if w["ok"] else "#7f1d1d"
+                text_color = "#86efac" if w["ok"] else "#fca5a5"
+                icon = "✅" if w["ok"] else "❌"
+                error_note = f"<br><small style='color:#94a3b8'>{w['error_type']}</small>" \
+                             if w["error_type"] not in ("None", "", "NoError") else ""
+                col.markdown(
+                    f"<div style='background:{bg}; border-radius:8px; padding:8px; "
+                    f"text-align:center; margin:4px;'>"
+                    f"<p style='color:{text_color}; margin:0; font-weight:600; font-size:0.9rem;'>"
+                    f"{icon} {w['word']}</p>"
+                    f"<p style='color:#94a3b8; margin:0; font-size:0.75rem;'>{w['accuracy']}%{error_note}</p>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+        # Problem phonemes for worst word
+        if result["problem_words"]:
+            worst = result["problem_words"][0]
+            bad_phonemes = [p for p in worst["phonemes"] if not p["ok"]]
+            if bad_phonemes:
+                st.markdown(f"**Problem sounds in '{worst['word']}':**")
+                ph_cols = st.columns(min(len(bad_phonemes), 6))
+                for i, ph in enumerate(bad_phonemes):
+                    ph_cols[i % len(ph_cols)].markdown(
+                        f"<div style='background:#7f1d1d; border-radius:6px; padding:6px; "
+                        f"text-align:center; margin:3px;'>"
+                        f"<p style='color:#fca5a5; margin:0; font-size:1.1rem; font-weight:700;'>/{ph['phoneme']}/</p>"
+                        f"<p style='color:#94a3b8; margin:0; font-size:0.7rem;'>{ph['score']}%</p>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+
+        # What was heard
         st.markdown("---")
         col1, col2 = st.columns(2)
         col1.markdown("**🎯 Target:**")
         col1.info(drill["sentence"])
-        col2.markdown("**🗣 What was heard:**")
-        col2.warning(result["actual"])
+        col2.markdown("**🗣 Azure heard:**")
+        col2.warning(result["actual_text"] or "—")
 
-        # Coach feedback
+        # Coach feedback with voice
         st.markdown("### 🎤 Coach Alex")
         with st.chat_message("assistant", avatar="🎤"):
-            st.markdown(result["feedback_text"])
-            if result["feedback_audio"]:
-                st.audio(result["feedback_audio"], format="audio/mp3", autoplay=False)
+            st.markdown(data["feedback_text"])
+            if data["feedback_audio"]:
+                st.audio(data["feedback_audio"], format="audio/mp3", autoplay=False)
 
-        # Update streak
-        if accuracy >= 70:
+        # Streak
+        if overall >= 70:
             st.session_state.streak += 1
-            st.success(f"🔥 Streak: {st.session_state.streak} in a row!")
+            st.success(f"🔥 Streak: {st.session_state.streak} in a row! Keep going!")
+        else:
+            st.session_state.streak = 0
 
         # Navigation
         st.markdown("---")
