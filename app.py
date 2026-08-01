@@ -429,7 +429,11 @@ def page_practice():
             feedback = get_coaching_feedback(analysis, drill["name"])
 
             st.write("🔊 Preparing your coach's voice...")
-            coach_audio = speak_feedback(feedback)
+            try:
+                coach_audio = speak_feedback(feedback)
+            except Exception as e:
+                coach_audio = None
+                st.warning(f"Voice unavailable: {e}")
 
             st.session_state.analysis = analysis
             st.session_state.feedback = feedback
