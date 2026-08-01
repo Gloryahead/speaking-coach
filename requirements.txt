@@ -5,3 +5,4 @@ supabase>=2.0.0
 pandas>=2.0.0
 numpy>=1.26.0
 azure-cognitiveservices-speech>=1.35.0
+streamlit-mic-recorder>=0.0.4

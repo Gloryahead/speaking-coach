@@ -27,6 +27,7 @@ from datetime import datetime
 import streamlit as st
 from groq import Groq
 from elevenlabs.client import ElevenLabs
+from streamlit_mic_recorder import mic_recorder
 
 from analysis import analyze_speech
 from database import save_session, get_recent_sessions, get_all_sessions
@@ -475,17 +476,20 @@ def page_practice():
     # ── Step 1: Record ────────────────────────────────────────────────────────
     if not st.session_state.analysis:
         st.markdown("### 🎙 Record Your Speech")
-        st.caption("Press the mic button to start, press again to stop.")
-        audio = st.audio_input(
-            "Record",
-            label_visibility="collapsed",
-            key=f"recorder_{st.session_state.get('audio_key', 0)}"
+        st.caption("Press 🎙 to start. Recording stops automatically after 2 seconds of silence.")
+
+        audio = mic_recorder(
+            start_prompt="🎙 Start recording",
+            stop_prompt="⏹ Stop recording",
+            just_once=True,
+            use_container_width=True,
+            key=f"recorder_{st.session_state.get('audio_key', 0)}",
         )
 
-        if audio:
+        if audio and audio.get("bytes"):
             with st.status("🔍 Analysing your speech...", expanded=True) as status:
                 st.write("📝 Transcribing audio...")
-                transcription = transcribe_audio(audio.getvalue())
+                transcription = transcribe_audio(audio["bytes"])
 
                 if not transcription["text"].strip():
                     st.error("No speech detected. Please try again.")
@@ -496,7 +500,7 @@ def page_practice():
                     transcript=transcription["text"],
                     word_timestamps=transcription["words"],
                     duration=transcription["duration"],
-                    audio_bytes=audio.getvalue(),
+                    audio_bytes=audio["bytes"],
                 )
 
                 st.write("🧠 Coach Alex is reviewing your speech...")
@@ -746,17 +750,21 @@ def page_pronunciation():
 
     # ── Record ────────────────────────────────────────────────────────────────
     st.markdown("### 🎙 Now say it:")
-    audio = st.audio_input(
-        "Record",
-        label_visibility="collapsed",
+    st.caption("Press 🎙 to start. Stops automatically after 2 seconds of silence.")
+
+    audio = mic_recorder(
+        start_prompt="🎙 Start recording",
+        stop_prompt="⏹ Stop recording",
+        just_once=True,
+        use_container_width=True,
         key=f"pronun_{st.session_state.get('audio_key', 0)}",
     )
 
-    if audio and not st.session_state.pronun_score:
+    if audio and audio.get("bytes") and not st.session_state.pronun_score:
         with st.status("🔍 Azure is scoring your pronunciation...", expanded=True) as status:
             st.write("🧠 Analysing phoneme by phoneme...")
             result = assess_pronunciation(
-                audio_bytes=audio.getvalue(),
+                audio_bytes=audio["bytes"],
                 target_sentence=drill["sentence"],
                 azure_key=st.secrets["AZURE_SPEECH_KEY"],
                 azure_region=st.secrets["AZURE_SPEECH_REGION"],
