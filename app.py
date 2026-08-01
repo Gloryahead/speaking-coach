@@ -567,6 +567,8 @@ def page_practice():
                 st.markdown(msg["text"])
                 if msg.get("audio"):
                     st.audio(msg["audio"], format="audio/mp3", autoplay=False)
+                else:
+                    st.warning("🔇 Voice failed — check ElevenLabs key permissions")
         else:
             with st.chat_message("user", avatar="🧑"):
                 st.markdown(msg["text"])
@@ -596,8 +598,9 @@ def page_practice():
             )
             try:
                 reply_audio = speak_feedback(reply)
-            except Exception:
+            except Exception as e:
                 reply_audio = None
+                st.error(f"ElevenLabs: {e}")
 
         st.session_state.chat_history.append({"role": "coach", "text": reply, "audio": reply_audio})
         st.rerun()
