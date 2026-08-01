@@ -204,9 +204,9 @@ div.stButton > button[kind="primary"]:hover {
 
 st.session_state.setdefault("page", "home")
 st.session_state.setdefault("analysis", None)
-st.session_state.setdefault("feedback", "")
-st.session_state.setdefault("coach_audio", None)
 st.session_state.setdefault("session_saved", False)
+# Chat history: list of {"role": "coach"|"user", "text": "...", "audio": bytes|None}
+st.session_state.setdefault("chat_history", [])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -253,6 +253,58 @@ def transcribe_audio(audio_bytes: bytes) -> dict:
         }
     finally:
         os.unlink(tmp_path)
+
+
+def chat_with_coach(user_message: str, analysis: dict, chat_history: list) -> str:
+    """
+    Continues a coaching conversation. Knows the full context:
+    - The speaker's transcript and metrics
+    - The entire conversation so far
+    Responds like a real coach — warm, specific, actionable.
+    """
+    client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+
+    vol = analysis.get("volume", {})
+    vol_var = vol.get("volume_variation", 0)
+    filler_summary = (
+        ", ".join(f'"{k}" ({v}×)' for k, v in analysis["fillers"].items())
+        if analysis["fillers"] else "none"
+    )
+
+    system_prompt = f"""You are Coach Alex, an expert communication scientist and public speaking coach.
+You are warm, encouraging, specific, and science-based. You help people find their authentic voice.
+
+You just analysed this speaker's recording. Here is their full data:
+- Speaking pace: {analysis['wpm']} WPM (ideal: 120–160)
+- Filler words: {filler_summary}
+- Strategic pauses: {analysis['strategic_pauses']}
+- Long pauses: {analysis['long_pauses']}
+- Volume variation: {vol_var}/100 (ideal: 15–60, higher = more expressive)
+- Overall score: {analysis['overall_score']}/100
+- Their transcript: "{analysis['transcript']}"
+
+You are now having a follow-up coaching conversation with this speaker.
+- Answer their questions with specific, actionable advice
+- Reference their actual transcript when relevant ("In your story, when you said X...")
+- Suggest concrete techniques from communication science
+- Keep responses under 120 words — this will be spoken aloud
+- Be conversational, warm, and encouraging — like a real human coach"""
+
+    # Build message history for the LLM
+    messages = [{"role": "system", "content": system_prompt}]
+    for msg in chat_history:
+        role = "assistant" if msg["role"] == "coach" else "user"
+        messages.append({"role": role, "content": msg["text"]})
+    messages.append({"role": "user", "content": user_message})
+
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=messages,
+        max_tokens=250,
+        temperature=0.7,
+    )
+
+    return response.choices[0].message.content
 
 
 def get_coaching_feedback(analysis: dict, drill_name: str) -> str:
@@ -408,82 +460,79 @@ def page_practice():
 
     st.markdown("---")
 
-    # ── Audio recorder ────────────────────────────────────────────────────────
-    # st.audio_input() creates a mic recorder widget — works on phone browsers.
-    st.markdown("### 🎙 Record Your Speech")
-    st.caption("Press the button to start recording. Press again to stop.")
+    # ── Step 1: Record ────────────────────────────────────────────────────────
+    if not st.session_state.analysis:
+        st.markdown("### 🎙 Record Your Speech")
+        st.caption("Press the mic button to start, press again to stop.")
+        audio = st.audio_input(
+            "Record",
+            label_visibility="collapsed",
+            key=f"recorder_{st.session_state.get('audio_key', 0)}"
+        )
 
-    audio = st.audio_input("Record", label_visibility="collapsed", key=f"recorder_{st.session_state.get('audio_key', 0)}")
+        if audio:
+            with st.status("🔍 Analysing your speech...", expanded=True) as status:
+                st.write("📝 Transcribing audio...")
+                transcription = transcribe_audio(audio.getvalue())
 
-    if audio and not st.session_state.analysis:
-        with st.status("🔍 Analysing your speech...", expanded=True) as status:
-            st.write("📝 Transcribing audio...")
-            transcription = transcribe_audio(audio.getvalue())
+                if not transcription["text"].strip():
+                    st.error("No speech detected. Please try again.")
+                    return
 
-            if not transcription["text"].strip():
-                st.error("No speech detected. Please try again.")
-                return
+                st.write("📊 Measuring pace, pauses, volume, and filler words...")
+                analysis = analyze_speech(
+                    transcript=transcription["text"],
+                    word_timestamps=transcription["words"],
+                    duration=transcription["duration"],
+                    audio_bytes=audio.getvalue(),
+                )
 
-            st.write("📊 Measuring pace, pauses, volume, and filler words...")
-            analysis = analyze_speech(
-                transcript=transcription["text"],
-                word_timestamps=transcription["words"],
-                duration=transcription["duration"],
-                audio_bytes=audio.getvalue(),
-            )
+                st.write("🧠 Coach Alex is reviewing your speech...")
+                feedback = get_coaching_feedback(analysis, drill["name"])
 
-            st.write("🧠 Generating coaching feedback...")
-            feedback = get_coaching_feedback(analysis, drill["name"])
+                st.write("🔊 Preparing Coach Alex's voice...")
+                try:
+                    coach_audio = speak_feedback(feedback)
+                except Exception as e:
+                    coach_audio = None
+                    st.warning(f"Voice unavailable ({e}) — showing text feedback below.")
 
-            st.write("🔊 Preparing your coach's voice...")
-            try:
-                coach_audio = speak_feedback(feedback)
-            except Exception as e:
-                coach_audio = None
-                st.error(f"ElevenLabs error: {type(e).__name__}: {e}")
+                # Save to session state
+                st.session_state.analysis = analysis
+                st.session_state.chat_history = [
+                    {"role": "coach", "text": feedback, "audio": coach_audio}
+                ]
+                status.update(label="✅ Coach Alex is ready!", state="complete", expanded=False)
+            st.rerun()
+        return
 
-            st.session_state.analysis = analysis
-            st.session_state.feedback = feedback
-            st.session_state.coach_audio = coach_audio
-            status.update(label="✅ Analysis complete!", state="complete", expanded=False)
+    # ── Step 2: Show metrics ──────────────────────────────────────────────────
+    analysis = st.session_state.analysis
+    overall = analysis["overall_score"]
+    color = "#22c55e" if overall >= 75 else "#f59e0b" if overall >= 50 else "#a855f7"
 
-    # ── Show results ──────────────────────────────────────────────────────────
-    if st.session_state.analysis:
-        analysis = st.session_state.analysis
-
-        st.markdown("---")
-        st.markdown("### 📊 Your Results")
-
-        # Score cards
-        overall = analysis["overall_score"]
-        color = "#22c55e" if overall >= 75 else "#f59e0b" if overall >= 50 else "#a855f7"
-
-        # Row 1: Overall, WPM, Fillers, Pauses
+    with st.expander("📊 Your Speech Metrics", expanded=False):
         col1, col2, col3, col4 = st.columns(4)
         col1.markdown(
             f"<div class='score-card'><p class='score-big' style='color:{color}'>{overall}</p>"
             f"<p class='score-label'>Overall</p></div>", unsafe_allow_html=True)
-
         wpm_color = "#22c55e" if 120 <= analysis["wpm"] <= 160 else "#f59e0b"
         col2.markdown(
             f"<div class='score-card'><p class='score-big' style='color:{wpm_color}'>{analysis['wpm']}</p>"
             f"<p class='score-label'>WPM</p></div>", unsafe_allow_html=True)
-
         filler_color = "#22c55e" if analysis["filler_total"] <= 2 else "#f59e0b" if analysis["filler_total"] <= 5 else "#ef4444"
         col3.markdown(
             f"<div class='score-card'><p class='score-big' style='color:{filler_color}'>{analysis['filler_total']}</p>"
             f"<p class='score-label'>Fillers</p></div>", unsafe_allow_html=True)
-
         pause_color = "#22c55e" if analysis["strategic_pauses"] >= 3 else "#f59e0b"
         col4.markdown(
             f"<div class='score-card'><p class='score-big' style='color:{pause_color}'>{analysis['strategic_pauses']}</p>"
             f"<p class='score-label'>Pauses ✓</p></div>", unsafe_allow_html=True)
 
-        # Row 2: Volume metrics
-        st.markdown("")
         vol = analysis.get("volume", {})
-        col1, col2, col3 = st.columns(3)
         vol_var = vol.get("volume_variation", 0)
+        st.markdown("")
+        col1, col2, col3 = st.columns(3)
         vol_color = "#22c55e" if 15 <= vol_var <= 60 else "#f59e0b"
         col1.markdown(
             f"<div class='score-card'><p class='score-big' style='color:{vol_color}'>{vol_var}</p>"
@@ -497,73 +546,75 @@ def page_practice():
             f"<div class='score-card'><p class='score-big' style='color:{long_color}'>{long_p}</p>"
             f"<p class='score-label'>Long Pauses</p></div>", unsafe_allow_html=True)
 
-        # Pause breakdown
-        if analysis.get("pause_details"):
-            st.markdown("**Strategic pauses detected after:**")
-            pause_text = " · ".join(
-                f'"{p["after_word"]}" ({p["duration"]}s)'
-                for p in analysis["pause_details"]
-            )
-            st.caption(pause_text)
-
-        # Volume feedback
-        if vol_var < 15:
-            st.info("🔊 Your volume is very consistent — try varying it more. Speak louder on key points, softer to draw listeners in.")
-        elif vol_var > 60:
-            st.info("🔊 Your volume varies a lot — try to keep it more controlled and intentional.")
-
-        # Filler word breakdown
         if analysis["fillers"]:
-            st.markdown("**Filler words detected:**")
+            st.markdown("**Filler words:**")
             badges = "".join(
                 f"<span class='filler-badge'>{word} ×{count}</span>"
                 for word, count in analysis["fillers"].items()
             )
             st.markdown(badges, unsafe_allow_html=True)
 
-        # Transcript
-        with st.expander("📝 Your transcript"):
+        with st.expander("📝 Transcript"):
             st.write(analysis["transcript"])
 
-        # ── Coach speaks ──────────────────────────────────────────────────────
-        st.markdown("---")
-        st.markdown("### 🔊 Your Coach")
-        st.markdown(
-            "<div class='info-box'>"
-            "👂 Press play to hear your personalised coaching feedback:"
-            "</div>",
-            unsafe_allow_html=True,
-        )
+    # ── Step 3: Chat with Coach ───────────────────────────────────────────────
+    st.markdown("### 💬 Coach Alex")
 
-        if st.session_state.coach_audio:
-            # autoplay=False — mobile browsers block autoplay, user taps play
-            st.audio(st.session_state.coach_audio, format="audio/mp3", autoplay=False)
+    # Display full conversation history
+    for msg in st.session_state.chat_history:
+        if msg["role"] == "coach":
+            with st.chat_message("assistant", avatar="🎤"):
+                st.markdown(msg["text"])
+                if msg.get("audio"):
+                    st.audio(msg["audio"], format="audio/mp3", autoplay=False)
+        else:
+            with st.chat_message("user", avatar="🧑"):
+                st.markdown(msg["text"])
 
-        # Written feedback
-        with st.expander("📋 Read feedback"):
-            st.markdown(st.session_state.feedback)
+    # Save session once
+    if not st.session_state.session_saved and st.session_state.chat_history:
+        first_feedback = st.session_state.chat_history[0]["text"]
+        save_session(analysis, drill["name"], first_feedback)
+        st.session_state.session_saved = True
 
-        # ── Save + next ───────────────────────────────────────────────────────
-        st.markdown("---")
+    # ── Text input for follow-up questions ───────────────────────────────────
+    st.markdown("---")
+    st.caption("Ask Coach Alex anything — how to improve your story, work on specific skills, or get an exercise to try right now.")
 
-        if not st.session_state.session_saved:
-            save_session(analysis, drill["name"], st.session_state.feedback)
-            st.session_state.session_saved = True
-            st.success("✅ Session saved to your history!")
+    user_input = st.chat_input("Ask your coach... e.g. 'How can I make my story more memorable?'")
 
-        col1, col2 = st.columns(2)
-        if col1.button("🔄 Practice Again", use_container_width=True):
-            st.session_state.analysis = None
-            st.session_state.feedback = ""
-            st.session_state.coach_audio = None
-            st.session_state.session_saved = False
-            # Force the audio widget to reset by changing its key
-            st.session_state.audio_key = st.session_state.get("audio_key", 0) + 1
-            st.rerun()
+    if user_input:
+        # Add user message to history
+        st.session_state.chat_history.append({"role": "user", "text": user_input, "audio": None})
 
-        if col2.button("🏠 Home", type="primary", use_container_width=True):
-            st.session_state.page = "home"
-            st.rerun()
+        # Get coach response
+        with st.spinner("Coach Alex is thinking..."):
+            reply = chat_with_coach(
+                user_message=user_input,
+                analysis=analysis,
+                chat_history=st.session_state.chat_history[:-1],  # exclude the just-added user msg
+            )
+            try:
+                reply_audio = speak_feedback(reply)
+            except Exception:
+                reply_audio = None
+
+        st.session_state.chat_history.append({"role": "coach", "text": reply, "audio": reply_audio})
+        st.rerun()
+
+    # ── Navigation ─────────────────────────────────────────────────────────────
+    st.markdown("")
+    col1, col2 = st.columns(2)
+    if col1.button("🔄 New Recording", use_container_width=True):
+        st.session_state.analysis = None
+        st.session_state.chat_history = []
+        st.session_state.session_saved = False
+        st.session_state.audio_key = st.session_state.get("audio_key", 0) + 1
+        st.rerun()
+
+    if col2.button("🏠 Home", type="primary", use_container_width=True):
+        st.session_state.page = "home"
+        st.rerun()
 
 
 def page_history():
