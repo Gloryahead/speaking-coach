@@ -370,12 +370,11 @@ def speak_feedback(text: str) -> bytes:
     """
     client = ElevenLabs(api_key=st.secrets["ELEVENLABS_API_KEY"])
 
-    # Rachel voice — clear, warm, professional
-    # Voice ID: 21m00Tcm4TlvDq8ikWAM
+    # George — warm, captivating storyteller (free premade voice)
     audio_generator = client.text_to_speech.convert(
-        voice_id="21m00Tcm4TlvDq8ikWAM",
+        voice_id="JBFqnCBsd6RMkjVDRZzb",
         text=text,
-        model_id="eleven_turbo_v2_5",   # fastest model — low latency
+        model_id="eleven_turbo_v2_5",
         output_format="mp3_44100_128",
     )
 
