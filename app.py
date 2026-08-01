@@ -237,10 +237,12 @@ def transcribe_audio(audio_bytes: bytes) -> dict:
         # response.words is a list of objects with .word, .start, .end
         words = []
         if hasattr(response, "words") and response.words:
-            words = [
-                {"word": w.word, "start": w.start, "end": w.end}
-                for w in response.words
-            ]
+            for w in response.words:
+                # Groq returns either objects or dicts depending on SDK version
+                if isinstance(w, dict):
+                    words.append({"word": w.get("word", ""), "start": w.get("start", 0), "end": w.get("end", 0)})
+                else:
+                    words.append({"word": getattr(w, "word", ""), "start": getattr(w, "start", 0), "end": getattr(w, "end", 0)})
 
         duration = getattr(response, "duration", 0) or 0
 
