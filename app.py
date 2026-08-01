@@ -31,6 +31,7 @@ from streamlit_mic_recorder import mic_recorder
 
 from analysis import analyze_speech
 from database import save_session, get_recent_sessions, get_all_sessions
+from exercises import EXERCISES
 from pronunciation import (
     PRONUNCIATION_DRILLS, assess_pronunciation, build_feedback_prompt
 )
@@ -42,80 +43,9 @@ from pronunciation import (
 # Based on: deliberate practice, spaced repetition, Toastmasters framework.
 # ══════════════════════════════════════════════════════════════════════════════
 
-DRILLS = {
-    0: {  # Monday
-        "name": "Pace Control",
-        "icon": "⏱",
-        "instruction": (
-            "Speak about your morning routine for 60–90 seconds. "
-            "Aim for a relaxed, steady pace. Imagine explaining it to a friend over coffee."
-        ),
-        "target": "120–140 WPM",
-        "science": "Studies show 130 WPM maximises both audience comprehension and perceived speaker confidence.",
-    },
-    1: {  # Tuesday
-        "name": "Filler Word Detox",
-        "icon": "🚫",
-        "instruction": (
-            "Describe your dream holiday for 60 seconds. "
-            "Every time you feel an 'um' or 'uh' coming — PAUSE instead. Silence is power."
-        ),
-        "target": "0–2 filler words",
-        "science": "Fillers signal uncertainty to listeners. Strategic silence signals confidence and gives brains time to process.",
-    },
-    2: {  # Wednesday
-        "name": "Power Pause",
-        "icon": "⏸",
-        "instruction": (
-            "Introduce yourself as if speaking at a TED conference. "
-            "After every key point, pause for a full second before continuing."
-        ),
-        "target": "3+ strategic pauses",
-        "science": "Pauses activate the audience's prefrontal cortex — making your message land deeper and be remembered longer.",
-    },
-    3: {  # Thursday
-        "name": "Vocal Energy",
-        "icon": "🔥",
-        "instruction": (
-            "Tell a story from your life for 90 seconds. "
-            "Start softly, build energy through the middle, end with full conviction."
-        ),
-        "target": "Volume + energy variation",
-        "science": "Vocal variety activates the limbic system in listeners, creating emotional connection and sustained attention.",
-    },
-    4: {  # Friday
-        "name": "Impromptu Speaking",
-        "icon": "💡",
-        "instruction": (
-            "Speak for 90 seconds on: 'What is the most important skill everyone should learn?' "
-            "No preparation — just go. Use the PREP structure: Point, Reason, Example, Point."
-        ),
-        "target": "Fluency + clear structure",
-        "science": "Impromptu practice builds neural pathways for confident spontaneous communication — the most feared situation.",
-    },
-    5: {  # Saturday
-        "name": "Storytelling Flow",
-        "icon": "📖",
-        "instruction": (
-            "Tell a story with a clear beginning, middle, and end. "
-            "Use the structure: Situation → Complication → Resolution. "
-            "Keep it under 2 minutes."
-        ),
-        "target": "Clear narrative arc",
-        "science": "Stories activate mirror neurons in listeners, making your message up to 22× more memorable than facts alone.",
-    },
-    6: {  # Sunday
-        "name": "Full Integration",
-        "icon": "🎯",
-        "instruction": (
-            "Give a 2-minute speech on any topic you care about. "
-            "Apply everything: pace, strategic pauses, zero fillers, vocal energy. "
-            "Pretend you're presenting to 100 people."
-        ),
-        "target": "Overall score > 75",
-        "science": "Integration practice consolidates the week's skills into long-term procedural memory.",
-    },
-}
+# DRILLS is now sourced from exercises.py — EXERCISES[day] is the canonical source.
+# Kept for any legacy references.
+DRILLS = EXERCISES
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -316,14 +246,13 @@ You are now having a follow-up coaching conversation with this speaker.
     return response.choices[0].message.content
 
 
-def get_coaching_feedback(analysis: dict, drill_name: str) -> str:
+def get_coaching_feedback(analysis: dict, exercise: dict) -> str:
     """
-    Sends analysis data to Groq LLaMA for science-based coaching feedback.
-    The coach persona: warm, specific, evidence-based, encouraging.
+    Sends analysis data to Groq LLaMA for targeted, technique-specific coaching.
+    The feedback is focused on how well the speaker executed the day's specific exercise.
     """
     client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
-    # Format filler words for the prompt
     filler_summary = (
         ", ".join(f'"{k}" ({v}×)' for k, v in analysis["fillers"].items())
         if analysis["fillers"] else "none detected — excellent!"
@@ -334,44 +263,49 @@ def get_coaching_feedback(analysis: dict, drill_name: str) -> str:
     vol_feedback = "monotone — needs more variation" if vol_var < 15 else "well varied" if vol_var <= 60 else "very erratic"
 
     prompt = f"""You are Coach Alex — a world-class communication coach, public speaking expert,
-and behavioral scientist. You have coached TEDx speakers, executives, and everyday people
-to find their authentic voice and communicate with power and clarity.
+and behavioral scientist. You coach TEDx speakers, executives, and everyday people
+to communicate with power, clarity, and authenticity.
 
-You combine insights from:
-- Toastmasters framework (structure, clarity, vocal variety)
-- Aristotle's rhetoric (ethos, pathos, logos)
-- Neuroscience of communication (mirror neurons, dopamine, attention)
-- Body language science (Amy Cuddy, Albert Mehrabian)
-- Storytelling (narrative arc, emotional hooks, specificity)
+Your expertise draws on:
+- Toastmasters evaluation framework (vocal variety, pace, emphasis)
+- Carmine Gallo's TED Talk analysis (500 talks studied)
+- Stanford GSB communication research (Matt Abrahams)
+- Obama's speechwriting principles (deliberate pause, rule of three)
+- Mehrabian's 7-38-55 rule (words/tone/body)
+- Neuroscience: mirror neurons, cortisol/oxytocin in speaking
 
-Here is this speaker's session data:
-- Drill: {drill_name}
+TODAY'S EXERCISE: {exercise['name']}
+TECHNIQUE BEING TRAINED: {exercise['technique']}
+SCIENCE: {exercise['science']}
+
+SPEAKER'S DATA:
 - Duration: {analysis['duration']} seconds
-- Words spoken: {analysis['word_count']}
-- Speaking pace: {analysis['wpm']} WPM (ideal: 120–160 WPM)
+- Speaking pace: {analysis['wpm']} WPM (ideal: 120–160)
 - Filler words: {filler_summary}
-- Strategic pauses: {analysis['strategic_pauses']} (aim for 3+)
+- Strategic pauses: {analysis['strategic_pauses']} (target: 3+)
 - Long pauses: {analysis['long_pauses']}
 - Volume variation: {vol_var}/100 — {vol_feedback} (ideal: 15–60)
 - Overall score: {analysis['overall_score']}/100
 
 Their transcript: "{analysis['transcript']}"
 
-Give rich, sophisticated coaching in this structure:
-1. ONE genuine specific strength from their actual words (quote them)
-2. Their single most impactful improvement area based on the data
-3. A specific science-based technique to fix it (name the technique)
-4. ONE insight about how effective speakers use this skill (reference a real speaker or study)
-5. A rewritten version of one sentence from their transcript — show them how it would sound stronger
-6. Encouraging close that makes them excited to practice again
+COACHING FOCUS FOR THIS SESSION:
+{exercise['coaching_instruction']}
 
-Keep under 200 words. Speak directly to them. This will be read aloud.
-Be sophisticated, warm, and inspiring — like a world-class human coach."""
+Structure your feedback:
+1. One genuine strength — quote a specific line from their transcript
+2. How well they executed TODAY'S specific technique (be precise with the data)
+3. One science-based fix they can apply in the next attempt
+4. A real example from a famous speaker who mastered this technique
+5. Encouraging close — make them want to try again immediately
+
+Under 200 words. Speak directly to them. This will be read aloud by text-to-speech.
+Be sophisticated, warm, and inspiring."""
 
     response = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=300,
+        max_tokens=320,
         temperature=0.7,
     )
 
@@ -465,10 +399,11 @@ def page_home():
 
     st.markdown(
         f"<div class='drill-card'>"
-        f"<p style='color:#a855f7; margin:0; font-size:0.85rem; font-weight:600;'>TODAY'S DRILL</p>"
+        f"<p style='color:#a855f7; margin:0; font-size:0.85rem; font-weight:600;'>TODAY'S EXERCISE</p>"
         f"<h2 style='margin:0.3rem 0;'>{drill['icon']} {drill['name']}</h2>"
-        f"<p style='margin:0.5rem 0; color:#cbd5e1;'>{drill['instruction']}</p>"
-        f"<p style='margin:0.5rem 0; font-size:0.85rem;'>🎯 <strong>Target:</strong> {drill['target']}</p>"
+        f"<p style='margin:0.4rem 0; color:#a855f7; font-size:0.9rem; font-weight:600;'>"
+        f"Technique: {drill['technique']}</p>"
+        f"<p style='margin:0.5rem 0; font-size:0.85rem;'>🎯 <strong>Target:</strong> {drill['target_label']}</p>"
         f"<p style='margin:0; font-size:0.8rem; color:#94a3b8;'>🔬 {drill['science']}</p>"
         f"</div>",
         unsafe_allow_html=True,
@@ -524,25 +459,70 @@ def page_home():
 
 
 def page_practice():
-    """Practice page — record audio, analyze, show results, play coach."""
+    """Practice page — guided script → record → targeted coaching feedback."""
     day = datetime.now().weekday()
-    drill = DRILLS[day]
+    exercise = EXERCISES[day]
 
     if st.button("← Home"):
         st.session_state.page = "home"
         st.rerun()
 
-    st.title(f"{drill['icon']} {drill['name']}")
+    st.title(f"{exercise['icon']} {exercise['name']}")
+
+    # ── Technique banner ──────────────────────────────────────────────────────
     st.markdown(
-        f"<div class='info-box'>{drill['instruction']}</div>",
+        f"<div class='drill-card'>"
+        f"<p style='color:#a855f7; margin:0 0 0.3rem; font-size:0.8rem; font-weight:700;'>"
+        f"TODAY'S TECHNIQUE</p>"
+        f"<p style='margin:0; font-weight:600; font-size:1.05rem; color:#e2e8f0;'>"
+        f"{exercise['technique']}</p>"
+        f"<p style='margin:0.6rem 0 0; font-size:0.78rem; color:#94a3b8;'>"
+        f"🔬 {exercise['science']}</p>"
+        f"</div>",
         unsafe_allow_html=True,
     )
 
     st.markdown("---")
 
-    # ── Step 1: Record ────────────────────────────────────────────────────────
+    # ── Step 1: Show the guided script ───────────────────────────────────────
     if not st.session_state.analysis:
-        st.markdown("### 🎙 Record Your Speech")
+        st.markdown("### 📖 Your Script — read this aloud")
+        st.markdown(
+            f"<div class='info-box' style='font-size:0.9rem; line-height:1.7; color:#cbd5e1;'>"
+            f"{exercise['instruction']}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        # Render the marked script with styled markers
+        marked = exercise["marked_text"]
+        # Style ··· pauses in purple, [MARKERS] in orange, CAPS words in bold white
+        import re
+        styled = marked
+        styled = styled.replace("···", "<span style='color:#a855f7; font-weight:700; font-size:1.1rem;'>···</span>")
+        styled = re.sub(r'\[([A-Z][^\]]*)\]', r"<span style='color:#f59e0b; font-size:0.8rem; font-weight:700;'>[\1]</span>", styled)
+        styled = styled.replace("\n", "<br>")
+
+        st.markdown(
+            f"<div style='"
+            f"background:#0f0f1a; border:2px solid #a855f7; border-radius:16px; "
+            f"padding:1.5rem 1.8rem; margin:1rem 0; "
+            f"font-size:1.05rem; line-height:2.0; color:#e2e8f0; font-family:Georgia,serif;'>"
+            f"{styled}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        st.markdown(
+            f"<div style='text-align:center; margin:0.5rem 0 1rem; color:#94a3b8; font-size:0.82rem;'>"
+            f"<span style='color:#a855f7'>···</span> = pause 1 second &nbsp;·&nbsp; "
+            f"<span style='color:#f59e0b'>[SOFT/BUILD/PEAK]</span> = volume guide &nbsp;·&nbsp; "
+            f"CAPS = stress this word"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        st.markdown("### 🎙 Now deliver it:")
         st.caption("Press 🎙 to start. Recording stops automatically after 2 seconds of silence.")
 
         audio = mic_recorder(
@@ -554,7 +534,7 @@ def page_practice():
         )
 
         if audio and audio.get("bytes"):
-            with st.status("🔍 Analysing your speech...", expanded=True) as status:
+            with st.status("🔍 Analysing your delivery...", expanded=True) as status:
                 st.write("📝 Transcribing audio...")
                 transcription = transcribe_audio(audio["bytes"])
 
@@ -570,8 +550,8 @@ def page_practice():
                     audio_bytes=audio["bytes"],
                 )
 
-                st.write("🧠 Coach Alex is reviewing your speech...")
-                feedback = get_coaching_feedback(analysis, drill["name"])
+                st.write("🧠 Coach Alex is evaluating your technique...")
+                feedback = get_coaching_feedback(analysis, exercise)
 
                 st.write("🔊 Preparing Coach Alex's voice...")
                 try:
@@ -667,7 +647,7 @@ def page_practice():
     # Save session once
     if not st.session_state.session_saved and st.session_state.chat_history:
         first_feedback = st.session_state.chat_history[0]["text"]
-        save_session(analysis, drill["name"], first_feedback)
+        save_session(analysis, exercise["name"], first_feedback)
         st.session_state.session_saved = True
 
     # ── Text input for follow-up questions ───────────────────────────────────
