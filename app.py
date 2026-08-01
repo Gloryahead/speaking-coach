@@ -268,6 +268,10 @@ def get_coaching_feedback(analysis: dict, drill_name: str) -> str:
         if analysis["fillers"] else "none detected — excellent!"
     )
 
+    vol = analysis.get("volume", {})
+    vol_var = vol.get("volume_variation", 0)
+    vol_feedback = "monotone — needs more variation" if vol_var < 15 else "well varied" if vol_var <= 60 else "very erratic"
+
     prompt = f"""You are Coach Alex, an expert communication scientist and public speaking coach.
 You have helped hundreds of people find their authentic voice and speak with confidence.
 Your feedback is warm, specific, science-based, and always actionable.
@@ -276,10 +280,12 @@ Here is the speaker's session data:
 - Drill: {drill_name}
 - Duration: {analysis['duration']} seconds
 - Words spoken: {analysis['word_count']}
-- Speaking pace: {analysis['wpm']} WPM (ideal range: 120–160 WPM)
+- Speaking pace: {analysis['wpm']} WPM (ideal: 120–160 WPM)
 - Filler words: {filler_summary}
-- Strategic pauses (0.5–2s): {analysis['strategic_pauses']} (aim for 3+)
-- Overly long pauses (>2s): {analysis['long_pauses']}
+- Strategic pauses (0.5–2.5s): {analysis['strategic_pauses']} (aim for 3+)
+- Overly long pauses (>2.5s): {analysis['long_pauses']}
+- Volume variation: {vol_var}/100 — {vol_feedback} (ideal: 15–60)
+- Average volume: {vol.get('avg_volume', 0)}/100
 - Overall score: {analysis['overall_score']}/100
 
 Their transcript: "{analysis['transcript']}"
@@ -418,11 +424,12 @@ def page_practice():
                 st.error("No speech detected. Please try again.")
                 return
 
-            st.write("📊 Measuring pace, pauses, and filler words...")
+            st.write("📊 Measuring pace, pauses, volume, and filler words...")
             analysis = analyze_speech(
                 transcript=transcription["text"],
                 word_timestamps=transcription["words"],
                 duration=transcription["duration"],
+                audio_bytes=audio.getvalue(),
             )
 
             st.write("🧠 Generating coaching feedback...")
@@ -451,34 +458,59 @@ def page_practice():
         overall = analysis["overall_score"]
         color = "#22c55e" if overall >= 75 else "#f59e0b" if overall >= 50 else "#a855f7"
 
+        # Row 1: Overall, WPM, Fillers, Pauses
         col1, col2, col3, col4 = st.columns(4)
         col1.markdown(
-            f"<div class='score-card'>"
-            f"<p class='score-big' style='color:{color}'>{overall}</p>"
-            f"<p class='score-label'>Overall</p></div>",
-            unsafe_allow_html=True,
-        )
+            f"<div class='score-card'><p class='score-big' style='color:{color}'>{overall}</p>"
+            f"<p class='score-label'>Overall</p></div>", unsafe_allow_html=True)
+
         wpm_color = "#22c55e" if 120 <= analysis["wpm"] <= 160 else "#f59e0b"
         col2.markdown(
-            f"<div class='score-card'>"
-            f"<p class='score-big' style='color:{wpm_color}'>{analysis['wpm']}</p>"
-            f"<p class='score-label'>WPM</p></div>",
-            unsafe_allow_html=True,
-        )
+            f"<div class='score-card'><p class='score-big' style='color:{wpm_color}'>{analysis['wpm']}</p>"
+            f"<p class='score-label'>WPM</p></div>", unsafe_allow_html=True)
+
         filler_color = "#22c55e" if analysis["filler_total"] <= 2 else "#f59e0b" if analysis["filler_total"] <= 5 else "#ef4444"
         col3.markdown(
-            f"<div class='score-card'>"
-            f"<p class='score-big' style='color:{filler_color}'>{analysis['filler_total']}</p>"
-            f"<p class='score-label'>Fillers</p></div>",
-            unsafe_allow_html=True,
-        )
+            f"<div class='score-card'><p class='score-big' style='color:{filler_color}'>{analysis['filler_total']}</p>"
+            f"<p class='score-label'>Fillers</p></div>", unsafe_allow_html=True)
+
         pause_color = "#22c55e" if analysis["strategic_pauses"] >= 3 else "#f59e0b"
         col4.markdown(
-            f"<div class='score-card'>"
-            f"<p class='score-big' style='color:{pause_color}'>{analysis['strategic_pauses']}</p>"
-            f"<p class='score-label'>Pauses ✓</p></div>",
-            unsafe_allow_html=True,
-        )
+            f"<div class='score-card'><p class='score-big' style='color:{pause_color}'>{analysis['strategic_pauses']}</p>"
+            f"<p class='score-label'>Pauses ✓</p></div>", unsafe_allow_html=True)
+
+        # Row 2: Volume metrics
+        st.markdown("")
+        vol = analysis.get("volume", {})
+        col1, col2, col3 = st.columns(3)
+        vol_var = vol.get("volume_variation", 0)
+        vol_color = "#22c55e" if 15 <= vol_var <= 60 else "#f59e0b"
+        col1.markdown(
+            f"<div class='score-card'><p class='score-big' style='color:{vol_color}'>{vol_var}</p>"
+            f"<p class='score-label'>Vol. Variety</p></div>", unsafe_allow_html=True)
+        col2.markdown(
+            f"<div class='score-card'><p class='score-big' style='color:#94a3b8'>{vol.get('avg_volume', 0)}</p>"
+            f"<p class='score-label'>Avg Volume</p></div>", unsafe_allow_html=True)
+        long_p = analysis["long_pauses"]
+        long_color = "#22c55e" if long_p == 0 else "#f59e0b" if long_p <= 2 else "#ef4444"
+        col3.markdown(
+            f"<div class='score-card'><p class='score-big' style='color:{long_color}'>{long_p}</p>"
+            f"<p class='score-label'>Long Pauses</p></div>", unsafe_allow_html=True)
+
+        # Pause breakdown
+        if analysis.get("pause_details"):
+            st.markdown("**Strategic pauses detected after:**")
+            pause_text = " · ".join(
+                f'"{p["after_word"]}" ({p["duration"]}s)'
+                for p in analysis["pause_details"]
+            )
+            st.caption(pause_text)
+
+        # Volume feedback
+        if vol_var < 15:
+            st.info("🔊 Your volume is very consistent — try varying it more. Speak louder on key points, softer to draw listeners in.")
+        elif vol_var > 60:
+            st.info("🔊 Your volume varies a lot — try to keep it more controlled and intentional.")
 
         # Filler word breakdown
         if analysis["fillers"]:
@@ -498,13 +530,14 @@ def page_practice():
         st.markdown("### 🔊 Your Coach")
         st.markdown(
             "<div class='info-box'>"
-            "👂 Listen to your personalised coaching feedback below:"
+            "👂 Press play to hear your personalised coaching feedback:"
             "</div>",
             unsafe_allow_html=True,
         )
 
         if st.session_state.coach_audio:
-            st.audio(st.session_state.coach_audio, format="audio/mp3", autoplay=True)
+            # autoplay=False — mobile browsers block autoplay, user taps play
+            st.audio(st.session_state.coach_audio, format="audio/mp3", autoplay=False)
 
         # Written feedback
         with st.expander("📋 Read feedback"):
